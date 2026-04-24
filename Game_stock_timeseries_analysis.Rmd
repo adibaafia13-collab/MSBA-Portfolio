@@ -1,0 +1,1088 @@
+---
+title: "BZAN548 Project"
+author: "Afia Adiba"
+date: "2026-03-05"
+output:
+  pdf_document: default
+---
+
+# Description
+
+This is the final project markdown file for BZAN 548. The purpose of the BZAN 548 final project is to perform an end-to-end analysis of a time series data set that you find online (or a pre-loaded data set from R). 
+
+
+
+```{r - Initial Load, results='hide', warning=FALSE, message=FALSE}
+library(datasets)
+library(fpp3)
+library(astsa)
+library(tseries)
+library(feasts)
+library(lubridate)
+library(tidyverse)
+library(quantmod)
+library(patchwork)
+library(fable.prophet)
+
+
+```
+ 
+ 
+***
+
+***
+
+# 1 - Data
+
+***
+```{r}
+
+getSymbols("EA", from = "2019-01-01", to = "2024-12-31", src = "yahoo")
+getSymbols("TTWO", from = "2019-01-01", to = "2024-12-31", src = "yahoo")
+
+
+
+# weekly tsibble
+ea_data <- EA |>
+  as.data.frame() |>
+  rownames_to_column("date") |>
+  mutate(date = as.Date(date))
+
+ttwo_data <- TTWO |>
+  as.data.frame() |>
+  rownames_to_column("date") |>
+  mutate(date = as.Date(date))
+
+# weekly aggregated data
+gaming_ts <- ea_data |>
+  mutate(week = yearweek(date)) |>
+  group_by(week) |>
+  summarise(
+    ea_price = mean(EA.Close, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  left_join(
+    ttwo_data |>
+      mutate(week = yearweek(date)) |>
+      group_by(week) |>
+      summarise(ttwo_price = mean(TTWO.Close, na.rm = TRUE), .groups = "drop"),
+    by = "week"
+  ) |>
+  as_tsibble(index = week)
+
+glimpse(gaming_ts)
+
+# checking the data
+range(gaming_ts$week)
+nrow(gaming_ts)
+
+# plot to verify
+gaming_ts |>
+  pivot_longer(c(ea_price, ttwo_price), names_to = "stock", values_to = "price") |>
+  autoplot(price) +
+  facet_wrap(~ stock, scales = "free_y", ncol = 1) +
+  labs(title = "Gaming Stock Prices (Weekly)", y = "Price (USD)")
+
+```
+
+***
+This project analyzes the weekly stock price of Electronic Arts (EA) from 2019 to 2025. The objective is to evaluate the forecasting performance of several time series models, including ARIMA, ETS, Prophet, and VAR, and to determine whether more complex models improve predictive accuracy.
+
+Given that stock prices are often characterized by trend, volatility, and potential interdependence across firms, this study also examines whether incorporating competitor stock prices (TTWO) through a VAR framework improves forecasting performance.
+
+***
+
+
+#### 1(a) - Provide a description of where your data come from (e.g., from a government website, an economic think tank, a scientific manuscript, etc.). If your data comes directly from an R package, use the R documentation to find out how the data was originally collected.
+
+***
+
+
+The data comes from Yahoo Finance and was accessed using the quantmod package in R, which retrieves historical stock price data through Yahoo Finance’s public API. The dataset contains daily closing prices for two publicly traded video game publishers: Electronic Arts (EA) and Take-Two Interactive (TTWO). For this project, the daily prices were aggregated into weekly averages to reduce noise and make longer-term trends and seasonality patterns easier to analyze. Yahoo Finance data reflects market-traded prices and therefore captures investor expectations, firm performance, and broader market conditions over time.
+
+
+
+***
+
+***
+
+
+#### 1(b) - The variables measured in your time series, and the units for each time series (e.g., stock price in USD, ocean temperature in Fahrenheit, exchange rates as a unitless ratio, etc.)
+
+***
+
+
+The focal variable in this analysis is the weekly average closing price of EA stock, measured in U.S. dollars (USD) per share. This represents the average market valuation of Electronic Arts’ stock over each week.
+
+The auxiliary variable is the weekly average closing price of TTWO stock, also measured in U.S. dollars (USD) per share. This represents the average market valuation of Take-Two Interactive’s stock over each week. Both variables are continuous-valued financial time series reflecting investor sentiment toward major gaming publishers.
+
+
+***
+
+***
+
+
+#### 1(c) - Your time series’ period and frequency, and the start/end dates.
+
+***
+
+
+```{r}
+
+range(gaming_ts$week)
+
+nrow(gaming_ts)
+
+# number of years
+n_weeks <- nrow(gaming_ts)
+n_years <- n_weeks / 52
+n_years
+```
+
+***
+
+The time series is measured at a weekly frequency, with each observation representing the average closing price within a calendar week. The series starts in 2019 Week 01 and ends in 2025 Week 01, covering approximately 314 weeks, which is just over 6 years of data. This provides more than five full seasonal cycles.
+
+***
+***
+
+#### 1(d) - Plots for each variable in your time series.
+
+***
+
+```{r - Code for Question 1(d)}
+
+gaming_ts |>
+  pivot_longer(c(ea_price, ttwo_price), names_to = "stock", values_to = "price") |>
+  autoplot(price) +
+  facet_wrap(~ stock, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Weekly Average Stock Prices: Gaming Industry",
+    y = "Stock Price (USD)",
+    x = "Week"
+  )
+
+# individual plot for EA
+gaming_ts |>
+  autoplot(ea_price) +
+  labs(
+    title = "Electronic Arts (EA) Weekly Stock Price",
+    y = "Price (USD)",
+    x = "Week"
+  )
+
+# individual plot for TTWO
+gaming_ts |>
+  autoplot(ttwo_price) +
+  labs(
+    title = "Take-Two Interactive (TTWO) Weekly Stock Price",
+    y = "Price (USD)",
+    x = "Week"
+  )
+
+
+```
+
+***
+***
+
+#### 1(e) - Provide a statement describing which variable you are using as your ‘focal’ time series and why. You will conduct most analyses (descriptive statistics, trend/season decomposition, etc.) with this time series, before including your other variables to see if they improve forecasting accuracy.
+
+***
+
+I am using Electronic Arts (EA) stock price as my focal time series. EA is one of the largest and most established gaming publishers with a diversified portfolio spanning sports games (FIFA, Madden), shooters (Battlefield, Apex Legends), and simulation games (The Sims). EA's stock price exhibits clear patterns related to quarterly earnings releases, annual game launch cycles (particularly FIFA in September/October), and holiday shopping seasons (Q4). The company's consistent revenue streams from sports franchises and live-service games provide a stable baseline with predictable seasonal patterns, making it well-suited for time series forecasting. Take-Two Interactive will serve as the auxiliary variable, as both companies operate in the same market, face similar competitive pressures, and respond to common industry trends like console generations, digital distribution growth, and esports popularity.
+
+
+***
+***
+
+# 2 - Time Series Characteristics
+
+This section will include descriptive statistics, trend/season decomposition, and stationarity analysis for your focal variable only. You do not need to complete these steps for every variable in your multivariate time series.
+
+
+***
+***
+
+#### 2(a) - The mean and standard deviation of the time series.
+
+
+***
+
+```{r - Code for Question 2(a)}
+
+# mean
+mean_price <- mean(gaming_ts$ea_price, na.rm = TRUE)
+mean_price
+
+# standard deviation
+n <- nrow(gaming_ts)
+var_price <- var(gaming_ts$ea_price, na.rm = TRUE) * (n - 1) / n
+sd_price <- sqrt(var_price)
+sd_price
+
+# using features
+gaming_ts |>
+  features(ea_price, list(mean = mean, sd = sd))
+
+```
+
+***
+
+The mean weekly stock price of EA over the sample period is approximately 125.35, while the standard deviation is about 17.21. This suggests that, on average, EA’s stock price fluctuates within a moderate range around its mean. The relatively large standard deviation compared to the mean reflects the volatility typical of equity markets, especially in a sector like gaming that is sensitive to earnings announcements, product releases, and broader market conditions.
+
+***
+***
+
+#### 2(b) - Provide an autocorrelation plot, up to at least $h=20$, more if needed for your data. Describe any features of the autocorrelation plot that stand out to you – do the autocorrelations ‘drop off’ after a certain lag? Does there appear to be seasonality?
+
+
+***
+
+```{r - Code for Question 2(b)}
+
+gaming_ts |>
+  ACF(ea_price, lag_max = 52) |>
+  autoplot() +
+  labs(title = "ACF: EA Weekly Stock Price")
+
+gaming_ts |>
+  PACF(ea_price, lag_max = 52) |>
+  autoplot() +
+  labs(title = "PACF: EA Weekly Stock Price")
+
+
+```
+
+***
+
+The ACF plot shows strong positive autocorrelation at low lags, which gradually decays rather than dropping off quickly. This indicates strong temporal dependence, meaning current EA prices are highly influenced by recent past values. The slow decay pattern is typical of non-stationary time series with trend-like behavior.
+
+The PACF shows a significant spike at lag 1, with smaller values afterward. This suggests that much of the short-term dependence can be captured with a low-order autoregressive structure. There is no very strong or sharp seasonal spike at specific lags, which suggests that any seasonality in weekly stock prices is relatively weak compared to the overall trend and momentum effects.
+
+***
+***
+
+#### 2(c) - Provide a brief analysis showing whether your time series is best modeled with additive or multiplicative seasonality. You may use in-sample validation (i.e., you don’t need to split your series into a training/testing set, use the entire data set and compare it to the fitted values) – therefore, you may use a moving-average based or regression-based decomposition for this step. I would recommend using MAPE (mean absolute percentage error) as your evaluation metric – but if you think another metric (e.g., mean absolute error) better suits your data, you may do so.
+
+
+***
+
+```{r - Code for Question 2(c)}
+
+# additive decomposition using STL
+fit_additive <- gaming_ts |>
+  model(
+    stl_add = STL(ea_price ~ trend(window = 21) + season(window = 13))
+  )
+
+# multiplicative decomposition (via log transformation)
+fit_multiplicative <- gaming_ts |>
+  model(
+    stl_mult = STL(log(ea_price) ~ trend(window = 21) + season(window = 13))
+  )
+
+# fitted values
+fitted_add <- fit_additive |>
+  augment() |>
+  select(week, ea_price, .fitted)
+
+fitted_mult <- fit_multiplicative |>
+  augment() |>
+  mutate(.fitted = exp(.fitted)) |>
+  select(week, ea_price, .fitted)
+
+
+mape_additive <- mean(abs((fitted_add$ea_price - fitted_add$.fitted) / 
+                            fitted_add$ea_price) * 100, na.rm = TRUE)
+mape_multiplicative <- mean(abs((fitted_mult$ea_price - fitted_mult$.fitted) / 
+                                  fitted_mult$ea_price) * 100, na.rm = TRUE)
+
+# Compare
+tibble(
+  Model = c("Additive", "Multiplicative"),
+  MAPE = c(mape_additive, mape_multiplicative)
+)
+
+```
+
+***
+
+The additive STL decomposition clearly outperforms the multiplicative version based on in-sample MAPE. The multiplicative model produces an extremely large MAPE value, indicating numerical instability and a very poor fit. This suggests that the seasonal variation in EA’s stock price does not scale proportionally with the level of the series, which is consistent with financial price data where seasonal effects tend to be additive rather than multiplicative. Therefore, an additive seasonal structure is more appropriate for modeling EA’s stock price.
+
+***
+***
+
+#### 2(d) - Provide a plot showing the trend and seasonal components of the focal time series. Use whichever seasonal model (additive or multiplicative) fits your data best. Use the same method (moving average or regression-based) that you used in the previous step.
+
+
+***
+
+```{r - Code for Question 2(d)}
+
+best_decomp <- gaming_ts |>
+  model(
+    STL(ea_price ~ trend(window = 21) + season(window = 13))
+  )
+
+components(best_decomp) |>
+  autoplot() +
+  labs(title = "STL Decomposition: EA Stock Price")
+
+comp <- components(best_decomp)
+
+p1 <- comp |>
+  autoplot(trend) +
+  labs(title = "Trend Component", y = "Price (USD)")
+
+p2 <- comp |>
+  autoplot(season_year) +
+  labs(title = "Seasonal Component (Yearly)", y = "Seasonal Effect")
+
+p1 / p2
+
+```
+
+
+***
+***
+
+#### 2(e) - Briefly comment on the components of your time series. Is there a notable trend? Is there notable cyclicality? What seasonal patterns exist?
+
+
+***
+
+
+The trend component shows a clear long-term upward movement in EA’s stock price, especially during the post-2020 period, reflecting growth in the gaming sector. There are also medium-term fluctuations that likely correspond to broader market cycles and company-specific events such as earnings announcements and major game releases.
+
+The seasonal component noticeable recurring patterns over the year. While seasonality is weaker than in many economic time series, there is some evidence of recurring effects that may be linked to holiday sales periods and annual release cycles in the gaming industry. Overall, trend dominates the series, with seasonality playing a secondary role and mild cyclicality present over multi-year periods. The remainder is not completely white noise, indicating the model missed to capture some part of the seasonal and trend component.
+
+***
+***
+
+#### 2(f) - Provide an analysis of stationarity, and a description of any necessary transformations to make the data stationary. You should use both a KPSS test and ADF test to assess stationarity. If the data are not stationary, optional transformations include:
+
+#### After the transformations, your series should pass both tests of stationarity. Briefly describe the steps you took for stationarity and explain why you chose those steps. 
+
+
+***
+
+```{r - Code for Question 2(f)}
+
+# original series
+gaming_ts |>
+  features(ea_price, unitroot_kpss)
+
+adf.test(na.omit(gaming_ts$ea_price))
+
+# Visual inspection
+gaming_ts |>
+  autoplot(ea_price) +
+  labs(title = "Original Series: EA Stock Price")
+
+# first difference
+gaming_diff <- gaming_ts |>
+  mutate(diff_ea = difference(ea_price))
+
+gaming_diff |>
+  autoplot(diff_ea) +
+  labs(title = "First Difference: EA Stock Price")
+
+# Test differenced series
+gaming_diff |>
+  features(diff_ea, unitroot_kpss)
+
+adf.test(na.omit(gaming_diff$diff_ea))
+
+# How many differences needed?
+gaming_ts |>
+  features(ea_price, unitroot_ndiffs)
+
+# ACF of differenced series
+gaming_diff |>
+  ACF(diff_ea, lag_max = 52) |>
+  autoplot() +
+  labs(title = "ACF: Differenced EA Stock Price")
+
+
+```
+
+
+***
+
+The original EA price series fails both stationarity tests: the KPSS test rejects stationarity, and the ADF test fails to reject the presence of a unit root. This aligns with visual inspection of the series, which shows a clear trend over time. Therefore, the original series is non-stationary.
+
+After applying a first difference, both the KPSS and ADF tests indicate stationarity. The differenced series fluctuates around a stable mean with no visible trend, and the ACF decays quickly. The unitroot_ndiffs function also suggests that only one difference is required. Since differencing alone was sufficient to achieve stationarity, no additional transformations (such as log transformation or detrending) were applied. This keeps the model simple while meeting the stationarity assumptions required for ARIMA and VAR models.
+
+***
+***
+
+# 3 - Modeling & Forecasting
+
+For this section, you will compare the performance of three forecasting models: a decomposition-based model (either Holt-Winters or Prophet), ARMA/ARIMA, and VARMA. Your VARMA model will use your focal time series, and at least one other variable from your data set. 
+
+***
+***
+
+#### 3(a) - Provide a description of the other variable(s) from your dataset that you will use in your multivariate model.
+
+
+***
+
+The auxiliary variable used in the multivariate model is the weekly average stock price of Take-Two Interactive (TTWO). TTWO operates in the same industry as EA and is subject to similar market forces, including console release cycles, consumer demand for AAA titles, digital distribution trends, and macroeconomic conditions. Because both firms are major publishers in the gaming industry, movements in TTWO’s stock price may contain information that helps explain or forecast movements in EA’s stock price.
+
+***
+***
+
+#### 3(b) - Provide a description of your training/test split (you should use the last 10-20% of your time series as your test set).
+
+
+***
+```{r}
+
+n_total <- nrow(gaming_ts)
+n_train <- floor(n_total * 0.85)
+n_test <- n_total - n_train
+
+
+train_data <- gaming_ts |>
+  slice(1:n_train)
+
+test_data <- gaming_ts |>
+  slice((n_train + 1):n_total)
+
+# split info
+tibble(
+  Set = c("Training", "Test", "Total"),
+  Observations = c(n_train, n_test, n_total),
+  Percentage = c(85, 15, 100),
+  Weeks = c(n_train, n_test, n_total),
+  Years = round(c(n_train, n_test, n_total) / 52, 1),
+  Start = c(min(train_data$week), min(test_data$week), min(gaming_ts$week)),
+  End = c(max(train_data$week), max(test_data$week), max(gaming_ts$week))
+)
+```
+
+
+***
+
+The dataset was split into training and test sets using an 85% / 15% split. The training set contains 266 weekly observations (approximately 5.1 years of data), while the test set contains 48 weeks (approximately 0.9 years). The training period spans from 2019 Week 01 to 2024 Week 05, and the test period spans from 2024 Week 06 to 2025 Week 01. This split preserves the time ordering of the data and ensures that model evaluation is based on genuinely out-of-sample forecasts.
+
+
+***
+***
+
+#### 3(c) - Provide a description of the decomposition-based model you fit to your training data (Holt-Winters or Prophet). Remember that these models do not require stationarity. 
+
+#### At this point you are using your training set to choose the *best* option among decomposition-based models using your whole training set. No cross-validation yet.
+
+
+***
+
+```{r - Code for Question 3(c)}
+
+# fit the models
+ets_fits <- train_data |>
+  model(
+    auto = ETS(ea_price),
+    prophet_seasonal = prophet(ea_price ~ season(period = "year", order = 10))
+  )
+
+
+# This compares them based on how much they missed the actual price in USD
+ets_fits |> 
+  accuracy() |> 
+  select(.model, RMSE, MAE, MAPE)
+
+# selecting the best model
+# I manually selected Prophet to meet the professor's requirement (as the Holt winter was reverting back to the simple smoothing model for the period more than 24 limitation)
+
+best_ets_name <- "prophet_seasonal"
+
+best_ets <- ets_fits |>
+  select(all_of(best_ets_name))
+
+
+best_ets |> 
+  components() |> 
+  autoplot() + 
+  labs(title = "Prophet Model Components: Trend and Seasonality")
+report(best_ets)
+
+best_ets |>
+  gg_tsresiduals()
+
+# Ljung-Box test
+augment(best_ets) |>
+  features(.innov, ljung_box, lag = 24)
+
+```
+
+
+***
+
+Several ETS models were compared using AICc on the training data. Due to the weekly frequency (period > 24), ETS models were unable to incorporate seasonality, and the best-performing model selected was ETS(A, N, N), which is a simple exponential smoothing model with additive errors and no trend or seasonal components. This suggests that short-term movements in EA’s stock price are best captured by a level-only model rather than explicit trend or seasonality components.
+
+Residual diagnostics show no strong autocorrelation, and the Ljung–Box test fails to reject the null hypothesis of no autocorrelation. This indicates that the ETS model residuals are approximately white noise, suggesting an adequate in-sample fit.
+
+
+***
+***
+
+#### 3(d) - Provide a description of your ARMA/ARIMA model. What are your p and q lags? Note that, if your stationarity transformation only required differencing, then you should use ARIMA on the raw time series and allow the ARIMA function to apply the differencing for you (which will ensure that your forecasts remain in original units). If you used any other transformation back transform your forecasts and manually calculate MAPE on the backtransformed values. Make sure to note that this will likely introduce bias - in the case of log transformation it changes the point forecast from mean to median with the exponents.
+
+#### At this point you are using your training set to choose the *best* option among ARIMA models using your whole training set. No cross-validation yet.
+
+
+***
+
+```{r - Code for Question 3(d)}
+
+# fitting multiple ARIMA models on training data
+arima_fits <- train_data |>
+  model(
+    arima011 = ARIMA(ea_price ~ pdq(0,1,1) + PDQ(0,0,0)),
+    arima110 = ARIMA(ea_price ~ pdq(1,1,0) + PDQ(0,0,0)),
+    arima111 = ARIMA(ea_price ~ pdq(1,1,1) + PDQ(0,0,0)),
+    arima110_100 = ARIMA(ea_price ~ pdq(1,1,0) + PDQ(1,0,0)),
+    auto_nonseasonal = ARIMA(ea_price ~ PDQ(0,0,0), stepwise = FALSE),
+    auto_seasonal = ARIMA(ea_price, stepwise = FALSE)
+  )
+
+# compare models
+glance(arima_fits) |>
+  arrange(AICc) |>
+  select(.model, AIC, AICc, BIC)
+
+# best model
+best_arima_name <- glance(arima_fits) |>
+  arrange(AICc) |>
+  slice(1) |>
+  pull(.model)
+
+best_arima <- arima_fits |>
+  select(all_of(best_arima_name))
+
+report(best_arima)
+
+# checking residuals
+best_arima |>
+  gg_tsresiduals()
+
+# Ljung-Box test (adjust dof based on actual model)
+augment(best_arima) |>
+  features(.innov, ljung_box, lag = 24, dof = 2) 
+
+```
+
+
+***
+
+The ARIMA model selected by AICc is ARIMA(0,1,1). The order (0,1,1) means:
+
+0 autoregressive terms
+
+1 order of differencing
+
+1 moving average term
+
+First differencing was required because the original series was non-stationary. The MA(1) term captures short-term shock dependence.
+
+The residual diagnostics show no significant autocorrelation (Ljung-Box p-value > 0.05), indicating the model is well specified. ARIMA achieves strong in-sample performance with low RMSE and MAPE.
+
+Overall, ARIMA provides a good balance between simplicity and predictive accuracy.
+
+
+***
+***
+
+#### 3(e) - Provide a description of your VAR model. What is your VAR order? Remember that VAR won’t perform differencing for you – so make sure your time series are stationary before running this model. Briefly describe the steps you took to make your non-focal variable(s) stationary. You should also describe whether your two time series are significantly related, by describing or presenting (in a table) significant VAR coefficients.
+
+#### At this point you are using your training set to choose the *best* option among VAR models using your whole training set. No cross-validation yet.
+
+
+***
+
+```{r - Code for Question 3(e)}
+
+# make both series stationary
+gaming_diff_both <- gaming_ts |>
+  mutate(
+    diff_ea = difference(ea_price),
+    diff_ttwo = difference(ttwo_price)
+  )
+
+train_diff <- gaming_diff_both |>
+  slice(1:n_train)
+
+test_diff <- gaming_diff_both |>
+  slice((n_train + 1):n_total)
+
+# Checking stationarity of auxiliary variable
+train_diff |>
+  features(diff_ttwo, unitroot_kpss)
+
+adf.test(na.omit(train_diff$diff_ttwo))
+
+# VAR models with different orders
+var_fits <- train_diff |>
+  model(
+    var1 = VAR(vars(diff_ea, diff_ttwo) ~ AR(1)),
+    var2 = VAR(vars(diff_ea, diff_ttwo) ~ AR(2)),
+    var3 = VAR(vars(diff_ea, diff_ttwo) ~ AR(3)),
+    var_aic = VAR(vars(diff_ea, diff_ttwo)),
+    var_bic = VAR(vars(diff_ea, diff_ttwo), ic = "bic")
+  )
+
+# compare models
+glance(var_fits) |>
+  arrange(AICc) |>
+  select(.model, AIC, AICc, BIC)
+
+# best model
+best_var_name <- glance(var_fits) |>
+  arrange(AICc) |>
+  slice(1) |>
+  pull(.model)
+
+best_var <- var_fits |>
+  select(all_of(best_var_name))
+
+report(best_var)
+
+# coefficients
+tidy(best_var)
+
+# residuals
+augment(best_var) |>
+  ACF(.innov) |>
+  autoplot()
+
+```
+
+
+Before fitting the VAR model, both EA and TTWO stock prices were differenced once to ensure stationarity. Stationarity tests on the differenced TTWO series confirm that this transformation was sufficient. Several VAR models with different lag orders were compared, and the model selected by AIC corresponds to a higher-order VAR.
+
+The VAR(5) model was selected based on AIC. This model incorporates both EA and TTWO differenced series to capture potential cross-series dynamics.
+
+However, most cross-lag coefficients are not statistically significant, suggesting limited predictive influence between the two stocks. In-sample performance for VAR is substantially worse than ARIMA and Prophet.
+
+This indicates that including TTWO does not meaningfully improve EA forecast performance.
+
+***
+***
+
+#### 3(f) - Now that you have the *best* decomposition-based, the *best* ARIMA and the *best* VAR models, use cross validation to compare their MAPE's for lags of h=1 till a reasonably longer forecast horizon, similar to what you did in the ARIMA assignment. Compare the three models' performances for shorter and longer term forecasting.
+
+
+
+***
+
+```{r - Code for Question 3(f)}
+
+# CV
+gaming_cv <- train_data |>
+  stretch_tsibble(.init = 104, .step = 4)
+
+# VAR needs differenced data
+gaming_diff_cv <- gaming_diff_both |>
+  filter(week %in% train_data$week) |>
+  stretch_tsibble(.init = 104, .step = 4)
+
+
+horizons <- c(1, 4, 8, 12, 16, 20, 24)
+mape_results <- tibble(
+  h = integer(),
+  model = character(),
+  MAPE = numeric()
+)
+
+
+for (h_val in horizons) {
+  
+  # models on CV folds
+  cv_prophet <- gaming_cv |>
+  model(Prophet = prophet(ea_price ~ season(period = "year", order = 10)))
+  
+  cv_arima <- gaming_cv |>
+    model(ARIMA = ARIMA(ea_price, stepwise = FALSE))
+  
+  cv_var <- gaming_diff_cv |>
+    model(VAR = VAR(vars(diff_ea, diff_ttwo)))
+
+  fc_prophet <- cv_prophet |>
+    forecast(h = h_val)
+  
+  acc_prophet <- fc_prophet |>
+    accuracy(train_data) |>
+    summarise(MAPE = mean(MAPE, na.rm = TRUE)) |>
+    mutate(h = h_val, model = "Prophet")
+  
+
+  fc_arima <- cv_arima |>
+    forecast(h = h_val)
+  
+  acc_arima <- fc_arima |>
+    accuracy(train_data) |>
+    summarise(MAPE = mean(MAPE, na.rm = TRUE)) |>
+    mutate(h = h_val, model = "ARIMA")
+  
+ 
+  fc_var <- cv_var |>
+    forecast(h = h_val)
+  
+  
+  fc_var_tbl <- fc_var |>
+    as_tibble()
+  
+  
+  fold_ids <- unique(fc_var_tbl$.id)
+
+  
+  mape_by_fold <- map_dbl(fold_ids, function(fold_id) {
+    
+   
+    fold_fc <- fc_var_tbl |>
+      filter(.id == fold_id) |>
+      arrange(week) |>
+      mutate(
+        
+        diff_ea_forecast = .mean[, 1]
+      )
+    
+
+    train_fold <- gaming_diff_cv |>
+      filter(.id == fold_id) |>
+      as_tibble() |>
+      filter(!is.na(diff_ea)) |>
+      arrange(week)
+    
+   
+    last_week <- train_fold |>
+      slice_tail(n = 1) |>
+      pull(week)
+    
+    start_price <- gaming_ts |>
+      filter(week == last_week) |>
+      pull(ea_price)
+    
+   
+    fold_fc <- fold_fc |>
+      mutate(
+        ea_price_forecast = start_price + cumsum(diff_ea_forecast)
+      )
+    
+  
+    actual_values <- gaming_ts |>
+      filter(week %in% fold_fc$week) |>
+      select(week, ea_price)
+    
+    # Join and calculate MAPE
+    comparison <- fold_fc |>
+      left_join(actual_values, by = "week") |>
+      filter(!is.na(ea_price))
+    
+    if (nrow(comparison) == 0) return(NA_real_)
+    
+    mape <- mean(abs((comparison$ea_price - comparison$ea_price_forecast) / comparison$ea_price) * 100, na.rm = TRUE)
+    return(mape)
+  })
+  
+ 
+  acc_var <- tibble(
+    MAPE = mean(mape_by_fold, na.rm = TRUE),
+    h = h_val,
+    model = "VAR"
+  )
+  
+  # Combine
+  mape_results <- bind_rows(mape_results, acc_prophet, acc_arima, acc_var)
+  
+  print(paste("Completed horizon", h_val, "- VAR MAPE:", round(acc_var$MAPE, 2)))
+}
+
+# Plot results
+mape_results |>
+  ggplot(aes(x = h, y = MAPE, colour = model)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Cross-Validation MAPE by Forecast Horizon",
+    subtitle = "EA Stock Price Forecasting Performance",
+    x = "Forecast Horizon (weeks)",
+    y = "MAPE (%)",
+    colour = "Model"
+  ) +
+  theme_minimal()
+
+# Summary statistics
+mape_results |>
+  group_by(model) |>
+  summarise(
+    mean_MAPE = mean(MAPE, na.rm = TRUE),
+    min_MAPE = min(MAPE, na.rm = TRUE),
+    max_MAPE = max(MAPE, na.rm = TRUE),
+    range = max_MAPE - min_MAPE
+  ) |>
+  arrange(mean_MAPE)
+
+```
+
+***
+
+
+Cross-validation results show that forecast accuracy decreases as the horizon increases, which is expected.
+
+VAR performs slightly better at very short horizons and performance decreases with increasing horizons, while ARIMA remains slightly behind across most horizons. The difference between ARIMA and VAR is not much. Prophet generally performs slightly worse than the other two models.
+
+However, the differences are relatively small, suggesting no model has a strong forecasting advantage.
+
+
+***
+***
+
+
+#### 3(g) - Plots showing all models’ forecasts for your test set along with the entirety of the actual time series. For VAR, R will give you forecasts for all variables, but you only need to show the forecast for your focal time series. For ARIMA and VAR, remember to undo any transformations you applied to the data to present your forecasts in original units. Briefly comment on the plots.
+
+
+
+***
+
+```{r - Code for Question 3(g)}
+
+# final models on full training data
+
+
+final_arima <- train_data |>
+  model(ARIMA = ARIMA(ea_price, stepwise = FALSE))
+
+final_var <- train_diff |>
+  model(VAR = VAR(vars(diff_ea, diff_ttwo)))
+
+final_prophet <- train_data |> 
+  model(Prophet = prophet(ea_price ~ season(period = "year", order = 10)))
+
+# Generate forecasts
+h_test <- nrow(test_data)
+
+
+fc_arima <- final_arima |>
+  forecast(h = h_test)
+
+fc_var_diff <- final_var |>
+  forecast(h = h_test)
+
+fc_prophet <- final_prophet |> forecast(h = h_test) 
+
+# Back-transform VAR forecasts from differences
+last_train_ea <- train_data$ea_price[nrow(train_data)]
+
+fc_var_transformed <- fc_var_diff |>
+  as_tibble() |>
+  mutate(
+    # Extract first column of .mean matrix (diff_ea forecasts)
+    diff_ea_forecast = .mean[, 1],
+    # Back-transform to original scale
+    ea_forecast = last_train_ea + cumsum(diff_ea_forecast),
+    week = test_data$week
+  )
+
+# Plot all forecasts
+
+
+p1 <- fc_arima |>
+  autoplot(gaming_ts |> filter(week >= yearweek("2023 W01"))) +
+  labs(title = "ARIMA Forecast", y = "Price (USD)")
+
+p2 <- gaming_ts |>
+  filter(week >= yearweek("2023 W01")) |>
+  autoplot(ea_price) +
+  geom_line(
+    data = fc_var_transformed,
+    aes(x = week, y = ea_forecast),
+    colour = "#0072B2",
+    linewidth = 1,
+    inherit.aes = FALSE  # Don't inherit aesthetics
+  ) +
+  labs(title = "VAR Forecast", y = "Price (USD)")
+
+# Individual plot for Prophet
+p3 <- fc_prophet |>
+  autoplot(gaming_ts |> filter(week >= yearweek("2023 W01"))) +
+  labs(title = "Prophet Forecast", y = "Price (USD)")
+
+(p1 / p2 / p3)
+
+# All on one plot
+gaming_ts |>
+  filter(week >= yearweek("2023 W01")) |>
+  autoplot(ea_price) +
+  autolayer(fc_arima, level = NULL, colour = "blue") +
+  autolayer(fc_prophet, level = NULL, colour = "purple") + # Prophet in Purple
+  geom_line(data = fc_var_transformed, aes(x = week, y = ea_forecast), 
+            colour = "darkgreen", linewidth = 1) +
+  labs(title = "All Models: EA Stock Price Test Set Forecasts",
+       subtitle = "Red: ETS | Blue: ARIMA | Purple: Prophet | Green: VAR",
+       y = "Stock Price (USD)", x = "Week") +
+  theme_minimal()
+
+
+
+```
+
+
+***
+
+The test set forecasts for ARIMA and VAR appear relatively flat. This occurs because both models were estimated on differenced data, and the differenced series behaves approximately like white noise.
+
+When the expected future change is close to zero, the optimal forecast remains near the last observed value, resulting in flat projections.
+
+Prophet produces a slightly smoother continuation of the trend but does not capture short-term fluctuations accurately.
+
+Flat forecasts reflect the weak predictability of stock prices rather than model misspecification.
+
+
+***
+***
+
+#### 3(h) - A table presenting the forecasting performance for all three models (decomposition, ARIMA, VAR). Please present both in-sample performance (i.e., the model’s fitted values versus training values) and out-of-sample performance (i.e., the model’s forecast for the test set versus the test values). 
+
+
+
+***
+
+```{r - Code for Question 3(h)}
+
+
+# In-sample performance (training set)
+
+
+in_sample_arima <- final_arima |>
+  accuracy() |>
+  select(.model, .type, RMSE, MAE, MAPE) |>
+  mutate(.model = "ARIMA")
+
+in_sample_prophet <- final_prophet |> accuracy() |> select(.model, .type, RMSE, MAE, MAPE)
+# VAR in-sample - CORRECTED VERSION
+# VAR in-sample - FIXED VERSION
+var_augmented <- augment(final_var) |>
+  as_tibble()
+
+# 1. Filter for EA and handle the NA from differencing
+var_fitted <- var_augmented |>
+  filter(.response == "diff_ea") |>
+  arrange(week) |>
+  # Remove the first NA row so cumsum works
+  filter(!is.na(.fitted))
+
+# 2. Get the actual prices, but skip the first week (since diffs start at week 2)
+# We use the price of the first week as the starting baseline
+base_price <- train_data$ea_price[1]
+
+var_fitted <- var_fitted |>
+  mutate(
+    # Reconstruct the price: Base Price + Sum of changes
+    ea_price_fitted = base_price + cumsum(.fitted)
+  )
+
+# 3. Join with actual prices
+train_prices <- train_data |> select(week, ea_price)
+
+var_comparison <- var_fitted |>
+  left_join(train_prices, by = "week")
+
+# 4. Calculate metrics (excluding the first NA week)
+in_sample_var <- tibble(
+  .model = "VAR",
+  .type = "Training",
+  RMSE = sqrt(mean((var_comparison$ea_price - var_comparison$ea_price_fitted)^2, na.rm = TRUE)),
+  MAE = mean(abs(var_comparison$ea_price - var_comparison$ea_price_fitted), na.rm = TRUE),
+  MAPE = mean(abs((var_comparison$ea_price - var_comparison$ea_price_fitted) / var_comparison$ea_price) * 100, na.rm = TRUE)
+)
+
+in_sample_var
+
+# Out-of-sample performance
+
+out_sample_arima <- fc_arima |>
+  accuracy(test_data) |>
+  select(.model, .type, RMSE, MAE, MAPE) |>
+  mutate(.model = "ARIMA")
+
+out_sample_prophet <- fc_prophet |> accuracy(test_data) |> 
+  select(.model, .type, RMSE, MAE, MAPE) |> mutate(.model = "Prophet")
+
+out_sample_var <- tibble(
+  .model = "VAR",
+  .type = "Test",
+  RMSE = sqrt(mean((test_data$ea_price - fc_var_transformed$ea_forecast)^2, na.rm = TRUE)),
+  MAE = mean(abs(test_data$ea_price - fc_var_transformed$ea_forecast), na.rm = TRUE),
+  MAPE = mean(abs((test_data$ea_price - fc_var_transformed$ea_forecast) / test_data$ea_price) * 100, na.rm = TRUE)
+)
+
+# Combine all results
+performance_table <- bind_rows(
+  in_sample_arima,in_sample_prophet,
+  in_sample_var,
+  out_sample_arima,out_sample_prophet,
+  out_sample_var
+) |>
+  select(.model, .type, RMSE, MAE, MAPE) |>
+  arrange(.type, MAPE)
+
+performance_table
+
+# Create formatted table
+performance_table |>
+  pivot_wider(
+    names_from = .type,
+    values_from = c(RMSE, MAE, MAPE),
+    names_sep = "_"
+  ) |>
+  select(.model, ends_with("Training"), ends_with("Test"))
+
+
+```
+
+
+***
+
+In the test set, all three models produce very similar error metrics, with MAPE around 6%.
+
+Although ARIMA performs best in-sample and VAR performs worse in training, their out-of-sample accuracy is nearly identical.
+
+This suggests that increased model complexity does not substantially improve forecasting performance for weekly stock prices. Also another factor for VAR performing  worse in training because the Take Two and EA data have not much relation and better in the test set might be because the recent unseen data was more stable.
+
+Overall, ARIMA is preferred due to its simplicity and comparable predictive performance (and less parameteres).The VAR model may still be useful for strategic analysis when studying longer-run co-movements across firms in the gaming industry, but it does not materially improve short-term predictive accuracy.
+
+From a business and managerial perspective, the results suggest that EA’s short-term stock price movements are driven primarily by its own recent performance and market momentum rather than by short-term spillovers from competitor stock prices. This implies that internal firm events (such as earnings announcements, game launches, and guidance updates) and overall market conditions are more important for near-term forecasting than competitor price movements.
+
+This highlights a common forecasting insight: adding more variables does not automatically improve forecasts, especially when those variables are highly correlated with broader market trends and do not provide strong leading signals.
+
+
+***
+***
+***
+***
+
+## GenAI disclaimer
+
+I used GenAI tools mainly for debugging and clarification purposes. Specifically:
+
+1. When I encountered issues with stationarity testing outputs (KPSS and ADF interpretation), I asked for clarification on how to interpret conflicting results.
+
+2. I asked for help understanding why the multiplicative decomposition produced extremely large MAPE values after log transformation and back-transformation.
+
+3. I used GenAI to debug reconstruction of the VAR forecasts after differencing, particularly ensuring the cumulative sum conversion back to level data was done correctly.
+
+4. I sought clarification on interpreting flat forecasts in the test set and whether that indicated a modeling error.
+
+5. I also asked conceptual questions about ARIMA(0,1,1), differencing order, and why models might perform similarly out-of-sample.
+
+
+***
+
+
+***
+
+
